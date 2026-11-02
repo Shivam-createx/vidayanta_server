@@ -130,7 +130,7 @@ const app = express();
 app.set("trust proxy", 1);
 
 // ================= PORT =================
-const port = process.env.PORT || 8000;
+const port = process.env.PORT || 5000;
 
 // ================= PATH =================
 const __filename = fileURLToPath(import.meta.url);
