@@ -1,0 +1,661 @@
+import mongoose from "mongoose";
+import Student from "../models/studentmodel.js";
+import Class from "../models/classmodel.js";
+import Attendance from "../models/attendancemodel.js";
+import Holiday from "../models/holidaymodel.js";
+import Teacher from "../models/teachermodel.js";
+import { getClassTeacherScope } from "../utils/getclassteacher.js";
+// ✅ GET STUDENTS (ONLY CLASS INCHARGE)
+export const getStudentsForAttendance = async (req, res) => {
+  try {
+    const { teacherId, institutionCode } = req.body;
+
+    const cls = await Class.findOne({
+      classIncharge: teacherId
+    }).select("className section").lean();
+
+    if (!cls) {
+      return res.status(404).json({
+        message: "No class assigned to this teacher"
+      });
+    }
+
+    const students = await Student.find({
+      className: cls.className,
+      section: cls.section,
+      institutionCode,
+      isArchived: { $ne: true }
+    }).sort({ rollNumber: 1 }).lean(); 
+  //  const sortedStudents = students.sort(
+  //   (a, b) => Number(a.rollNumber) - Number(b.rollNumber)
+  //  );
+    res.status(200).json({
+      className: cls.className,
+      section: cls.section,
+      students: students
+    });
+
+  } catch (error) {
+      // console.log("🔥 REAL ERROR:", error);   // 👈 ADD THIS
+      res.status(500).json({
+        message: error.message   // 👈 CHANGE THIS
+      });
+    }
+};
+
+// ✅ SAVE ATTENDANCE (FIXED 🔥)
+export const uploadAttendance = async (req, res) => {
+  try {
+    const { className, section, attendance } = req.body;
+
+    if (!className || !section || !attendance || typeof attendance !== "object") {
+      return res.status(400).json({ message: "Class and attendance are required" });
+    }
+
+    const scope = await getClassTeacherScope(req, { className, section });
+    if (!scope) {
+      return res.status(403).json({ message: "Class teacher access required" });
+    }
+
+    const entries = Object.entries(attendance);
+    const studentIds = entries.map(([studentId]) => studentId);
+    if (
+      entries.length === 0 ||
+      studentIds.some((id) => !mongoose.Types.ObjectId.isValid(id)) ||
+      new Set(studentIds).size !== studentIds.length ||
+      entries.some(([, status]) => !["present", "absent", "leave"].includes(status))
+    ) {
+      return res.status(400).json({ message: "Invalid attendance records" });
+    }
+
+    const students = await Student.find({
+      _id: { $in: studentIds },
+      className: scope.classData.className,
+      section: scope.classData.section,
+      institutionCode: scope.classData.institutionCode,
+      isArchived: { $ne: true },
+    })
+      .select("_id")
+      .lean();
+    if (students.length !== studentIds.length) {
+      return res.status(400).json({
+        message: "Attendance must include only active students in your class",
+      });
+    }
+
+    const today = new Date().toISOString().split("T")[0];
+
+    const holiday = await Holiday.findOne({
+      institutionCode: scope.classData.institutionCode,
+      date: today,
+    }).select("title").lean();
+    if (holiday) {
+      return res.status(409).json({
+        message: `Attendance cannot be marked on the holiday: ${holiday.title}`,
+      });
+    }
+
+    // ❌ prevent duplicate
+    const exist = await Attendance.findOne({
+      className: scope.classData.className,
+      section: scope.classData.section,
+      institutionCode: scope.classData.institutionCode,
+      date: today
+    }).lean();
+
+    if (exist) {
+      return res.status(400).json({
+        message: "Attendance already uploaded today"
+      });
+    }
+
+    // ✅ convert object → array
+    // ✅ SAVE IN ATTENDANCE MODEL
+    await Attendance.create({
+      teacherId: scope.teacher._id,
+      institutionCode: scope.classData.institutionCode,
+      className: scope.classData.className,
+      section: scope.classData.section,
+      date: today,
+      records: entries.map(([studentId, status]) => ({ studentId, status }))
+    });
+
+    res.status(200).json({
+      message: "Attendance saved successfully"
+    });
+
+  } catch (error) {
+    // console.log("🔥 ERROR:", error);   // 🔥 DEBUG
+    res.status(500).json({
+      message: error.message
+    });
+  }
+};
+
+// ✅ GET ATTENDANCE
+export const getMyAttendance = async (req, res) => {
+  try {
+    const { teacherId } = req.query;
+
+    const data = await Attendance.find({ teacherId })
+      .populate("records.studentId", "name rollNumber")
+      .sort({ date: -1 }).lean();
+
+    res.json({ data });
+
+  } catch (error) {
+    // console.log(error);
+    res.status(500).json({
+      message: "Server error"
+    });
+  }
+};
+
+
+
+// export const getStudentAttendance = async (req, res) => {
+//   try {
+//     const { studentId } = req.query;
+
+//     if (!studentId) {
+//       return res.status(400).json({
+//         message: "Student ID required"
+//       });
+//     }
+
+//     // ✅ STEP 1: student find
+//     const student = await Student.findById(studentId);
+
+//     if (!student) {
+//       return res.status(404).json({
+//         message: "Student not found"
+//       });
+//     }
+
+//     // ✅ STEP 2: class find
+//     const classData = await Class.findOne({
+//       className: student.className,
+//       section: student.section,
+//       institutionCode: student.institutionCode
+//     }).lean();
+
+//     let teacherName = "N/A";
+
+//     // ✅ STEP 3: teacher find
+//     if (classData?.classIncharge) {
+//       const teacher = await Teacher.findById(classData.classIncharge);
+//       teacherName = teacher?.teacherName || "N/A";
+//     }
+
+//     // ✅ STEP 4: attendance find (FIXED)
+//     const data = await Attendance.find({
+//       "records.studentId": studentId
+//     });
+
+//     let allRecords = [];
+
+//     data.forEach(doc => {
+//       const filtered = doc.records.filter(
+//         r => r.studentId.toString() === studentId
+//       );
+
+//       filtered.forEach(r => {
+//         allRecords.push({
+//           date: doc.date,
+//           status: r.status
+//         });
+//       });
+//     });
+
+//     // ✅ SUMMARY
+//     let total = allRecords.length;
+//     let present = allRecords.filter(r => r.status === "present").length;
+//     let absent = allRecords.filter(r => r.status === "absent").length;
+
+//     let percentage =
+//       total === 0 ? 0 : ((present / total) * 100).toFixed(2);
+
+//     // ✅ FINAL RESPONSE (🔥 IMPORTANT)
+//     res.json({
+//       className: student.className,
+//       teacherName,
+//       summary: { total, present, absent, percentage },
+//       records: allRecords
+//     });
+
+//   } catch (error) {
+//     // console.log(error);
+//     res.status(500).json({
+//       message: "Server error"
+//     });
+//   }
+// };
+
+export const getStudentAttendance = async (req, res) => {
+  try {
+    const { studentId } = req.query;
+
+    if (!studentId) {
+      return res.status(400).json({
+        message: "Student ID required",
+      });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(studentId)) {
+      return res.status(400).json({
+        message: "Invalid student ID",
+      });
+    }
+
+    // Student
+    const student = await Student.findById(studentId);
+
+    if (!student) {
+      return res.status(404).json({
+        message: "Student not found",
+      });
+    }
+
+    // Class
+    const classData = await Class.findOne({
+      className: student.className,
+      section: student.section,
+      institutionCode: student.institutionCode,
+    }).lean();
+
+    let teacherName = "N/A";
+
+    if (classData?.classIncharge) {
+      const teacher = await Teacher.findById(classData.classIncharge);
+
+      teacherName = teacher?.teacherName || "N/A";
+    }
+
+    // Attendance
+    const attendanceDocs = await Attendance.find({
+      "records.studentId": studentId,
+    })
+      .sort({ date: 1 })
+      .lean();
+
+    let allRecords = [];
+
+    attendanceDocs.forEach((doc) => {
+      doc.records.forEach((record) => {
+        if (record.studentId.toString() === studentId.toString()) {
+          allRecords.push({
+            date: doc.date,
+            status: record.status,
+          });
+        }
+      });
+    });
+
+    // ------------------------
+    // SUMMARY
+    // ------------------------
+
+    const total = allRecords.length;
+
+    const present = allRecords.filter(
+        r => r.status.toLowerCase()=="present"
+    ).length;
+
+    const absent = allRecords.filter(
+        r => r.status.toLowerCase()=="absent"
+    ).length;
+
+    const leave = allRecords.filter(
+        r => r.status.toLowerCase()=="leave"
+    ).length;
+
+    // Percentage ignores leave
+
+
+    const attendedDays = total - leave;
+    const percentage =
+    attendedDays > 0
+    ? Number(((present/attendedDays)*100).toFixed(1))
+    :0;
+
+    // ------------------------
+    // CURRENT STREAK
+    // ------------------------
+
+    let streak = 0;
+
+    for (let i = allRecords.length - 1; i >= 0; i--) {
+      if (allRecords[i].status === "present") {
+        streak++;
+      } else {
+        break;
+      }
+    }
+
+    // ------------------------
+    // MONTHLY TREND
+    // ------------------------
+
+    const monthlyTrend = {};
+
+    allRecords.forEach((record) => {
+      const month = new Date(record.date).toLocaleString("en-IN", {
+        month: "short",
+        year: "numeric",
+      });
+
+     if (!monthlyTrend[month]) {
+        monthlyTrend[month] = {
+          present: 0,
+          absent: 0,
+          leave: 0,
+        };
+      }
+
+      switch (record.status.toLowerCase()) {
+        case "present":
+          monthlyTrend[month].present++;
+          break;
+
+        case "absent":
+          monthlyTrend[month].absent++;
+          break;
+
+        case "leave":
+          monthlyTrend[month].leave++;
+          break;
+      }
+    });
+
+    // ------------------------
+    // WEEKLY TREND
+    // ------------------------
+
+    const weeklyTrend = {};
+
+    allRecords.forEach((record) => {
+      const week = new Date(record.date).toLocaleDateString("en-IN", {
+        weekday: "short",
+      });
+
+      if (!weeklyTrend[week]) {
+        weeklyTrend[week] = 0;
+      }
+
+      if (record.status === "present") {
+        weeklyTrend[week]++;
+      }
+    });
+
+    // ------------------------
+    // CALENDAR
+    // ------------------------
+
+    const calendar = allRecords.map((item) => ({
+      date: item.date,
+      status: item.status,
+    }));
+
+    // ------------------------
+    // ACHIEVEMENT
+    // ------------------------
+
+    let achievement = null;
+
+    if (percentage === 100) {
+      achievement = {
+        title: "Perfect Attendance",
+        icon: "🏆",
+        color: "green",
+      };
+    } else if (percentage >= 90) {
+      achievement = {
+        title: "Excellent Attendance",
+        icon: "⭐",
+        color: "blue",
+      };
+    }
+
+    // ------------------------
+    // WARNING
+    // ------------------------
+
+    let warning = null;
+
+    if (percentage < 75) {
+      warning = {
+        title: "Attendance Below 75%",
+        message:
+          "Improve your attendance to meet school requirements.",
+      };
+    }
+
+    // ------------------------
+
+    return res.json({
+      success: true,
+
+      className: student.className,
+
+      teacherName,
+
+      summary: {
+        total,
+        present,
+        absent,
+        leave,
+        percentage,
+        streak,
+      },
+
+      calendar,
+
+      monthlyTrend,
+
+      weeklyTrend,
+
+      achievement,
+
+      warning,
+
+      records: allRecords,
+    });
+  } catch (error) {
+    res.status(500).json({
+      message: error.message,
+    });
+  }
+};
+
+export const getStudentsAttendanceInstitution = async (req, res) => {
+  try {
+    const { className, section, institutionCode } = req.query;
+
+    const students = await Student.find({
+      className,
+      section,
+      institutionCode,
+    }).lean();
+
+    const attendanceDocs = await Attendance.find({
+      className,
+      section,
+      institutionCode,
+    }).lean();
+
+    const result = students.map((stu) => {
+      let total = 0;
+      let present = 0;
+
+      attendanceDocs.forEach((doc) => {
+        doc.records.forEach((r) => {
+          if (r.studentId.toString() === stu._id.toString()) {
+            total++;
+            if (r.status === "present") present++;
+          }
+        });
+      });
+
+      const percentage =
+        total > 0 ? ((present / total) * 100).toFixed(1) : 0;
+
+      return {
+        _id: stu._id,
+        name: stu.name,
+        rollNumber: stu.rollNumber,
+        percentage,
+        totalAttendanceDays: total,
+      };
+    });
+
+    return res.json({
+      success: true,
+      data: result,
+    });
+
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+};
+export const getStudentAttendanceDetails = async (req, res) => {
+  try {
+    const { studentId } = req.query;
+
+    if (!studentId) {
+      return res.status(400).json({
+        message: "Student ID required",
+      });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(studentId)) {
+      return res.status(400).json({
+        message: "Invalid student ID",
+      });
+    }
+
+    const attendanceDocs = await Attendance.find({
+        "records.studentId": studentId
+      }).sort({ date: -1 }).lean();
+
+      let allRecords = [];
+
+      attendanceDocs.forEach(doc => {
+        doc.records.forEach(r => {
+          if (r.studentId.toString() === studentId.toString()) {
+            allRecords.push({
+              date: doc.date,
+              status: r.status
+            });
+          }
+        });
+      });
+
+      const total = allRecords.length;
+      const present = allRecords.filter(r => r.status.toLowerCase() === "present").length;
+      const absent = allRecords.filter(r => r.status.toLowerCase() === "absent").length;
+      const leave = allRecords.filter(r => r.status.toLowerCase() === "leave").length;
+      const attendedDays = total - leave;
+
+      const percentage = attendedDays > 0
+        ? ((present / attendedDays) * 100).toFixed(1)
+        : 0;
+
+    res.json({
+      success: true,
+      records: allRecords,   // 🔥 IMPORTANT
+      summary: {
+        total,
+        present,
+        absent,
+        leave,
+        percentage
+      }
+    });
+
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+// ✅ UPDATE
+export const updateAttendance = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { attendance } = req.body;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "Invalid attendance ID" });
+    }
+    if (!attendance || typeof attendance !== "object" || Array.isArray(attendance)) {
+      return res.status(400).json({ message: "Attendance records are required" });
+    }
+
+    const existing = await Attendance.findById(id).lean();
+    if (!existing) {
+      return res.status(404).json({ message: "Attendance not found" });
+    }
+    const scope = await getClassTeacherScope(req, {
+      className: existing.className,
+      section: existing.section,
+    });
+    if (!scope) {
+      return res.status(403).json({ message: "Class teacher access required" });
+    }
+    const holiday = await Holiday.findOne({
+      institutionCode: scope.classData.institutionCode,
+      date: existing.date,
+    }).select("title").lean();
+    if (holiday) {
+      return res.status(409).json({
+        message: `Attendance cannot be edited on the holiday: ${holiday.title}`,
+      });
+    }
+
+    const entries = Object.entries(attendance);
+    const studentIds = entries.map(([studentId]) => studentId);
+    if (
+      entries.length === 0 ||
+      studentIds.some((studentId) => !mongoose.Types.ObjectId.isValid(studentId)) ||
+      new Set(studentIds).size !== studentIds.length ||
+      entries.some(([, status]) => !["present", "absent", "leave"].includes(status))
+    ) {
+      return res.status(400).json({ message: "Invalid attendance records" });
+    }
+
+    const students = await Student.find({
+      className: scope.classData.className,
+      section: scope.classData.section,
+      institutionCode: scope.classData.institutionCode,
+      isArchived: { $ne: true },
+    }).select("_id").lean();
+    const activeIds = new Set(students.map((student) => student._id.toString()));
+    if (studentIds.some((studentId) => !activeIds.has(studentId))) {
+      return res.status(400).json({ message: "Attendance contains students outside your active class" });
+    }
+
+    const archivedRecords = existing.records.filter(
+      (record) => !activeIds.has(record.studentId.toString()),
+    );
+    const updated = await Attendance.findByIdAndUpdate(
+      id,
+      {
+        records: [
+          ...archivedRecords,
+          ...entries.map(([studentId, status]) => ({ studentId, status })),
+        ],
+      },
+      { new: true, runValidators: true },
+    ).lean();
+
+    return res.json({ success: true, data: updated });
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+// ✅ DELETE
+export const deleteAttendance = async (req, res) => {
+  const { id } = req.params;
+
+  await Attendance.findByIdAndDelete(id).lean();
+
+  res.json({ success: true });
+};
